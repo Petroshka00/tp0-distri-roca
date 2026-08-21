@@ -87,28 +87,32 @@ func (client *Client) Run() error {
 	for scanner.Scan() {
 		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
 		
-		clientMessage := scanner.Text()
+		clientMessage := fmt.Sprintf("%s,%s", client.config.AgencyId, scanner.Text())
 		
 		if err := safe_socket.SendAll(client.conn, []byte(clientMessage)); err != nil {
 			logger.Error("send-message", logger.Fail, messageArgs...)
 			return err
 		}
-		
-		responseBuffer, err := safe_socket.RecvAll(client.conn)
-		if err != nil {
-			logger.Error("recv-response", logger.Fail, messageArgs...)
-			return err
-		}
-		responseStr := string(responseBuffer)
-		outputFile.WriteString(responseStr + "\n")
-		outputFile.Sync()
-		if string(responseBuffer) != clientMessage {
-			logger.Error("check-response", logger.Fail, messageArgs...)
-			return err
-		}
-		
 		messageId++
 	}
+
+	messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
+	clientMessage := "END"
+	if err := safe_socket.SendAll(client.conn, []byte(clientMessage)); err != nil {
+		logger.Error("send-message", logger.Fail, messageArgs...)
+		return err
+	}
+
+	responseBuffer, err := safe_socket.RecvAll(client.conn)
+	if err != nil {
+		logger.Error("recv-response", logger.Fail, messageArgs...)
+		return err
+	}
+
+	responseStr := string(responseBuffer)
+	outputFile.WriteString(responseStr + "\n")
+	outputFile.Sync()
+
 	logger.Info(mainAction, logger.Success, "agency-id", client.config.AgencyId)
 	
 	return nil
