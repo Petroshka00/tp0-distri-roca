@@ -26,18 +26,9 @@ func SendAll(socket io.Writer, bytes []byte) error {
 func RecvAll(socket io.Reader) ([]byte, error) {
 	header := make([]byte, 4)
 	
-	readTotalHeader := 0
-	targetHeaderLenght := 4
-
-	for readTotalHeader < targetHeaderLenght {
-		n, err := socket.Read(header[readTotalHeader:])
-		if err != nil {
-			return nil, err
-		}
-		if n == 0 {
-			return nil, err
-		}
-		readTotalHeader += n
+	header, err := ReadAmount(socket, 4)
+	if err != nil {
+		return nil, err
 	}
 
 	dataLenght := binary.BigEndian.Uint32(header)
@@ -46,8 +37,19 @@ func RecvAll(socket io.Reader) ([]byte, error) {
 	}
 
 	data := make([]byte, dataLenght)
+
+	data, err = ReadAmount(socket, int(dataLenght))
+	if err != nil {
+		return nil, err
+	}
+
+	return data, nil
+}
+
+func ReadAmount(socket io.Reader, amount int) ([]byte, error) {
+	data := make([]byte, amount)
 	readTotalData := 0
-	targetDataLenght := int(dataLenght)
+	targetDataLenght := amount
 
 	for readTotalData < targetDataLenght {
 		n, err := socket.Read(data[readTotalData:])
