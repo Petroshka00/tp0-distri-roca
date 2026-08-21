@@ -3,9 +3,6 @@ import logger
 import safe_socket
 from lottery import Lottery, Bet
 
-_ECHO_SERVER_MESSAGE_SIZE = 1024
-
-
 class Server:
     def __init__(self, server_host: str, server_port: int) -> None:
         self.server_host = server_host
@@ -34,10 +31,18 @@ class Server:
                 if client_message == b"END":
                     break
 
-                bet = self._decode_bet(client_message)
-                agency_id = bet.agency_id
-                client_bets.append(bet)
-                message_amount += 1
+                decoded_msg = client_message.decode("utf-8")
+                decoded_bets = decoded_msg.strip().split("\n")
+                
+                for bet_str in decoded_bets:
+                    if bet_str == "":
+                        continue
+                    bet = self._decode_bet(bet_str)
+                    agency_id = bet.agency_id
+                    client_bets.append(bet)
+                    message_amount += 1
+
+                safe_socket.send_all(client_socket, b"SUCCESS\n")
 
             if agency_id is not None:
                 client_lottery.store_bets(client_bets)
@@ -50,9 +55,8 @@ class Server:
             )
             raise e
 
-    def _decode_bet(self, data: bytes) -> Bet:
-        decoded_msg = data.decode("utf-8")
-        parts = decoded_msg.strip().split(",")
+    def _decode_bet(self, bet_str: str) -> Bet:
+        parts = bet_str.strip().split(",")
         bet = Bet(
             agency_id=int(parts[0]),
             first_name=parts[1],

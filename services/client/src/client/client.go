@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"os"
 	"fmt"
+	"strings"
 )
 
 const CONNECTION_ATTEMPTS_MAX = 3
@@ -23,6 +24,7 @@ type ClientConfig struct {
 	ServerHost string
 	ServerPort string
 	AgencyId   string
+	BatchSize  int
 }
 
 type Client struct {
@@ -84,19 +86,46 @@ func (client *Client) Run() error {
 	scanner := bufio.NewScanner(file)
 	messageId := 0
 	
+	batch := []string{}
 	for scanner.Scan() {
 		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
-		
 		clientMessage := fmt.Sprintf("%s,%s", client.config.AgencyId, scanner.Text())
-		
-		if err := safe_socket.SendAll(client.conn, []byte(clientMessage)); err != nil {
-			logger.Error("send-message", logger.Fail, messageArgs...)
-			return err
+
+		batch = append(batch, clientMessage)
+
+		if len(batch) == client.config.BatchSize {
+			finalMessage := strings.Join(batch, "\n")
+			if err := safe_socket.SendAll(client.conn, []byte(finalMessage)); err != nil {
+				logger.Error("send-message", logger.Fail, messageArgs...)
+				return err
+			}
+
+			responseBuffer, err := safe_socket.RecvAll(client.conn)
+			if string(responseBuffer) != "SUCCESS\n" {
+				logger.Error("recv-batch-success", logger.Fail, messageArgs...)
+				return err
+			}
+
+			batch = []string{}				
 		}
 		messageId++
 	}
-
+	
 	messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
+	if len(batch) > 0 {
+		finalMessage := strings.Join(batch, "\n")
+		if err := safe_socket.SendAll(client.conn, []byte(finalMessage)); err != nil {
+			logger.Error("send-message", logger.Fail, messageArgs...)
+			return err
+		}
+
+		responseBuffer, err := safe_socket.RecvAll(client.conn)
+		if string(responseBuffer) != "SUCCESS\n" {
+			logger.Error("recv-batch-success", logger.Fail, messageArgs...)
+			return err
+		}
+	}
+
 	clientMessage := "END"
 	if err := safe_socket.SendAll(client.conn, []byte(clientMessage)); err != nil {
 		logger.Error("send-message", logger.Fail, messageArgs...)
