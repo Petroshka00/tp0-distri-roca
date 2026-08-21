@@ -17,7 +17,7 @@ class Server:
             logger.info(action, logger.LogResult.in_progress)
             while True:
                 client_message = safe_socket.recv_all(
-                    client_socket, _ECHO_SERVER_MESSAGE_SIZE
+                    client_socket
                 )
                 if not client_message:
                     logger.info(
