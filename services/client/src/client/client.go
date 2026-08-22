@@ -8,8 +8,8 @@ import (
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/safe_socket"
 
 	"bufio"
-	"os"
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -24,6 +24,8 @@ type ClientConfig struct {
 	ServerHost string
 	ServerPort string
 	AgencyId   string
+	InputFile  string
+	OutputFile string
 	BatchSize  int
 }
 
@@ -67,25 +69,24 @@ func connectToServer(host, port string) (net.Conn, error) {
 func (client *Client) Run() error {
 	const mainAction = "test-echo-server"
 	defer client.conn.Close()
-	inputFilePath := fmt.Sprintf("/input/input-%s.csv", client.config.AgencyId)
-	file, err_file := os.Open(inputFilePath)
+
+	file, err_file := os.Open(client.config.InputFile)
 	if err_file != nil {
-		logger.Error("open-file", logger.Fail, "file-path", inputFilePath)
+		logger.Error("open-file", logger.Fail, "file-path", client.config.InputFile)
 		return err_file
 	}
 	defer file.Close()
 
-	outputFilePath := fmt.Sprintf("/output/output-%s.csv", client.config.AgencyId)
-	outputFile, err_output := os.Create(outputFilePath)
+	outputFile, err_output := os.Create(client.config.OutputFile)
 	if err_output != nil {
-		logger.Error("create-file", logger.Fail, "file-path", outputFilePath)
+		logger.Error("create-file", logger.Fail, "file-path", client.config.OutputFile)
 		return err_output
 	}
 	defer outputFile.Close()
-	
+
 	scanner := bufio.NewScanner(file)
 	messageId := 0
-	
+
 	batch := []string{}
 	for scanner.Scan() {
 		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
@@ -106,11 +107,11 @@ func (client *Client) Run() error {
 				return err
 			}
 
-			batch = []string{}				
+			batch = []string{}
 		}
 		messageId++
 	}
-	
+
 	messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
 	if len(batch) > 0 {
 		finalMessage := strings.Join(batch, "\n")
@@ -143,6 +144,6 @@ func (client *Client) Run() error {
 	outputFile.Sync()
 
 	logger.Info(mainAction, logger.Success, "agency-id", client.config.AgencyId)
-	
+
 	return nil
 }
