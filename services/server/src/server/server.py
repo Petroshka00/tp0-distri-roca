@@ -31,72 +31,86 @@ class Server:
         with self.clients_lock:
             self.client_sockets.remove(client_socket)
 
-    def _handle_client(self, client_socket):
-        action = "handle-client"
+    def _receive_client_bets(self, client_socket):
         message_amount = 0
         client_bets = []
         agency_id = None
+
+        while True:
+            client_message = safe_socket.recv_all(client_socket)
+            if not client_message:
+                return agency_id, client_bets, message_amount, False
+
+            if client_message == b"END":
+                break
+
+            decoded_msg = client_message.decode("utf-8")
+            decoded_bets = decoded_msg.strip().split("\n")
+
+            for bet_str in decoded_bets:
+                if not bet_str:
+                    continue
+                bet = self._decode_bet(bet_str)
+                agency_id = bet.agency_id
+                client_bets.append(bet)
+                message_amount += 1
+
+            safe_socket.send_msg(client_socket, b"SUCCESS\n")
+
+        return agency_id, client_bets, message_amount, True
+
+    def _wait_for_quorum(self, agency_id: int) -> bool:
+        with self.quorum_cond:
+            self.finalized_agencies.add(agency_id)
+            while len(self.finalized_agencies) < self.agency_quorum_min and self.running:
+                self.quorum_cond.wait()
+            self.quorum_cond.notify_all()
+        return self.running
+
+    def _process_lottery_results(self, agency_id: int, client_bets: list[Bet]) -> list[Bet]:
+        lottery_storage_path = f"./bets-{agency_id}.csv"
+        if os.path.exists(lottery_storage_path):
+            os.remove(lottery_storage_path)
+
+        client_lottery = Lottery(lottery_storage_path)
+        client_lottery.store_bets(client_bets)
+        return self._determine_winners(client_lottery, agency_id)
+
+    def _send_winners(self, client_socket, winners: list[Bet]) -> None:
+        encoded_winners = self._encode_winners(winners)
+        safe_socket.send_msg(client_socket, encoded_winners)
+
+    def _handle_client(self, client_socket):
+        action = "handle-client"
+        message_amount = 0
         try:
             logger.info(action, logger.LogResult.in_progress)
-            while True:
-                client_message = safe_socket.recv_all(
-                    client_socket
-                )
-                if not client_message:
-                    logger.info(
-                        action,
-                        logger.LogResult.success,
-                        "messages-amount",
-                        message_amount,
-                    )
-                    return
-                if client_message == b"END":
-                    break
 
-                decoded_msg = client_message.decode("utf-8")
-                decoded_bets = decoded_msg.strip().split("\n")
-                
-                for bet_str in decoded_bets:
-                    if bet_str == "":
-                        continue
-                    bet = self._decode_bet(bet_str)
-                    agency_id = bet.agency_id
-                    client_bets.append(bet)
-                    message_amount += 1
+            agency_id, client_bets, message_amount, completed = self._receive_client_bets(client_socket)
+            if not completed or agency_id is None:
+                logger.info(action, logger.LogResult.success, "messages-amount", message_amount)
+                return
 
-                safe_socket.send_all(client_socket, b"SUCCESS\n")
+            if not self._wait_for_quorum(agency_id):
+                return
 
-            if agency_id is not None:
-                with self.quorum_cond:
-                    self.finalized_agencies.add(agency_id)
-                    
-                    while len(self.finalized_agencies) < self.agency_quorum_min and self.running:
-                        self.quorum_cond.wait()
+            winners = self._process_lottery_results(agency_id, client_bets)
+            self._send_winners(client_socket, winners)
+            logger.info(action, logger.LogResult.success, "messages-amount", message_amount)
 
-                    self.quorum_cond.notify_all()
-
-                if not self.running:
-                    return
-
-                lottery_storage_path = f"./bets-{agency_id}.csv"
-
-                if os.path.exists(lottery_storage_path):
-                    os.remove(lottery_storage_path)
-                
-                client_lottery = Lottery(lottery_storage_path)
-                client_lottery.store_bets(client_bets)
-                winners = self._determine_winners(client_lottery, agency_id)
-                encoded_winners = self._encode_winners(winners)
-                safe_socket.send_all(client_socket, encoded_winners)
         except Exception as e:
-            logger.error(
-                action, logger.LogResult.fail, "messages-amount", message_amount
-            )
+            logger.error(action, logger.LogResult.fail, "messages-amount", message_amount)
             raise e
+        finally:
+            self._unregister_client(client_socket)
+            try:
+                client_socket.close()
+            except Exception:
+                pass
 
     def _decode_bet(self, bet_str: str) -> Bet:
         parts = bet_str.strip().split(",")
-        bet = Bet(
+        return Bet(
             agency_id=int(parts[0]),
             first_name=parts[1],
             last_name=parts[2],
@@ -104,20 +118,18 @@ class Server:
             birthdate=parts[4],
             number=int(parts[5]),
         )
-        return bet
 
     def _determine_winners(self, lottery: Lottery, agency_id: int) -> list[Bet]:
-        winners = []
-        for bet in lottery.load_bets():
-            if bet.agency_id == agency_id and lottery.has_won(bet):
-                winners.append(bet)
-        return winners
+        return [
+            bet for bet in lottery.load_bets()
+            if bet.agency_id == agency_id and lottery.has_won(bet)
+        ]
 
     def _encode_winners(self, winners: list[Bet]) -> bytes:
-        lines = []
-        for winner in winners:
-            line = f"{winner.first_name},{winner.last_name},{winner.document},{winner.birthdate},{winner.number}"
-            lines.append(line)
+        lines = [
+            f"{winner.first_name},{winner.last_name},{winner.document},{winner.birthdate},{winner.number}"
+            for winner in winners
+        ]
         return "\n".join(lines).encode("utf-8")
 
     def _handle_sigterm(self, signum, frame):
@@ -131,6 +143,7 @@ class Server:
                 self.server_socket.close()
             except Exception:
                 pass
+
         with self.clients_lock:
             for socket in list(self.client_sockets):
                 try:
@@ -156,20 +169,23 @@ class Server:
                     break
                 logger.error(action, logger.LogResult.fail)
                 raise e
+
             logger.info(action, logger.LogResult.success)
             client_thread = threading.Thread(
                 target=self._handle_client,
                 args=(client_socket,)
             )
+            self._register_client(client_socket, client_thread)
             client_thread.start()
-
 
         with self.clients_lock:
             threads = list(self.client_threads)
         for t in threads:
             t.join(timeout=0.5)
+
         if self.server_socket:
             try:
                 self.server_socket.close()
             except Exception:
                 pass
+

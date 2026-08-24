@@ -8,16 +8,9 @@ import (
 //TODO: Complete with a short-read/short-write tolerant implementation
 
 func SendAll(socket io.Writer, bytes []byte) error {
-	dataLenght := len(bytes)
-
-	message := make([]byte, 4+dataLenght)
-
-	binary.BigEndian.PutUint32(message[0:4], uint32(dataLenght))
-	copy(message[4:], bytes)
-
 	alreadyWritten := 0
-	for alreadyWritten < len(message) {
-		n, err := socket.Write(message[alreadyWritten:])
+	for alreadyWritten < len(bytes) {
+		n, err := socket.Write(bytes[alreadyWritten:])
 		if err != nil {
 			return err
 		}
@@ -26,33 +19,39 @@ func SendAll(socket io.Writer, bytes []byte) error {
 	return nil
 }
 
-func RecvAll(socket io.Reader) ([]byte, error) {
-	header := make([]byte, 4)
+func SendMsg(socket io.Writer, bytes []byte) error {
+	dataLength := len(bytes)
+	message := make([]byte, 4+dataLength)
+	binary.BigEndian.PutUint32(message[0:4], uint32(dataLength))
+	copy(message[4:], bytes)
+	return SendAll(socket, message)
+}
 
+func RecvAll(socket io.Reader, amount int) ([]byte, error) {
+	return ReadAmount(socket, amount)
+}
+
+func RecvMsg(socket io.Reader) ([]byte, error) {
 	header, err := ReadAmount(socket, 4)
 	if err != nil {
 		return nil, err
 	}
 
-	dataLenght := binary.BigEndian.Uint32(header)
-	if dataLenght == 0 {
+	dataLength := binary.BigEndian.Uint32(header)
+	if dataLength == 0 {
 		return []byte{}, nil
 	}
 
-	return ReadAmount(socket, int(dataLenght))
+	return ReadAmount(socket, int(dataLength))
 }
 
 func ReadAmount(socket io.Reader, amount int) ([]byte, error) {
 	data := make([]byte, amount)
 	readTotalData := 0
-	targetDataLenght := amount
 
-	for readTotalData < targetDataLenght {
+	for readTotalData < amount {
 		n, err := socket.Read(data[readTotalData:])
 		if err != nil {
-			return nil, err
-		}
-		if n == 0 {
 			return nil, err
 		}
 		readTotalData += n
@@ -60,3 +59,4 @@ func ReadAmount(socket io.Reader, amount int) ([]byte, error) {
 
 	return data, nil
 }
+

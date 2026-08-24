@@ -72,23 +72,63 @@ func (client *Client) Close() {
 	}
 }
 
+func (client *Client) sendBatch(batch []string, messageId int) error {
+	messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
+	finalMessage := strings.Join(batch, "\n")
+	if err := safe_socket.SendMsg(client.conn, []byte(finalMessage)); err != nil {
+		logger.Error("send-message", logger.Fail, messageArgs...)
+		return err
+	}
+
+	responseBuffer, err := safe_socket.RecvMsg(client.conn)
+	if err != nil || string(responseBuffer) != "SUCCESS\n" {
+		logger.Error("recv-batch-success", logger.Fail, messageArgs...)
+		return err
+	}
+
+	return nil
+}
+
+func (client *Client) sendEndAndReceiveWinners(messageId int) (string, error) {
+	messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
+	if err := safe_socket.SendMsg(client.conn, []byte("END")); err != nil {
+		logger.Error("send-message", logger.Fail, messageArgs...)
+		return "", err
+	}
+
+	responseBuffer, err := safe_socket.RecvMsg(client.conn)
+	if err != nil {
+		logger.Error("recv-response", logger.Fail, messageArgs...)
+		return "", err
+	}
+
+	return string(responseBuffer), nil
+}
+
+func (client *Client) writeWinners(winners string) error {
+	outputFile, err := os.Create(client.config.OutputFile)
+	if err != nil {
+		logger.Error("create-file", logger.Fail, "file-path", client.config.OutputFile)
+		return err
+	}
+	defer outputFile.Close()
+
+	if _, err := outputFile.WriteString(winners + "\n"); err != nil {
+		return err
+	}
+	return outputFile.Sync()
+}
+
 func (client *Client) Run() error {
 	const mainAction = "test-echo-server"
 	defer client.conn.Close()
 
-	file, err_file := os.Open(client.config.InputFile)
-	if err_file != nil {
+	file, err := os.Open(client.config.InputFile)
+	if err != nil {
 		logger.Error("open-file", logger.Fail, "file-path", client.config.InputFile)
-		return err_file
+		return err
 	}
 	defer file.Close()
-
-	outputFile, err_output := os.Create(client.config.OutputFile)
-	if err_output != nil {
-		logger.Error("create-file", logger.Fail, "file-path", client.config.OutputFile)
-		return err_output
-	}
-	defer outputFile.Close()
 
 	scanner := bufio.NewScanner(file)
 	messageId := 0
@@ -96,63 +136,33 @@ func (client *Client) Run() error {
 	batch := make([]string, 0, client.config.BatchSize)
 	for scanner.Scan() {
 		clientMessage := fmt.Sprintf("%s,%s", client.config.AgencyId, scanner.Text())
-
 		batch = append(batch, clientMessage)
 
 		if len(batch) == client.config.BatchSize {
-			messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
-			finalMessage := strings.Join(batch, "\n")
-			if err := safe_socket.SendAll(client.conn, []byte(finalMessage)); err != nil {
-				logger.Error("send-message", logger.Fail, messageArgs...)
+			if err := client.sendBatch(batch, messageId); err != nil {
 				return err
 			}
-
-			responseBuffer, err := safe_socket.RecvAll(client.conn)
-			if string(responseBuffer) != "SUCCESS\n" {
-				logger.Error("recv-batch-success", logger.Fail, messageArgs...)
-				return err
-			}
-
 			batch = batch[:0]
 		}
 		messageId++
 	}
 
 	if len(batch) > 0 {
-		finalMessage := strings.Join(batch, "\n")
-		if err := safe_socket.SendAll(client.conn, []byte(finalMessage)); err != nil {
-			messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
-			logger.Error("send-message", logger.Fail, messageArgs...)
-			return err
-		}
-
-		responseBuffer, err := safe_socket.RecvAll(client.conn)
-		if string(responseBuffer) != "SUCCESS\n" {
-			messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
-			logger.Error("recv-batch-success", logger.Fail, messageArgs...)
+		if err := client.sendBatch(batch, messageId); err != nil {
 			return err
 		}
 	}
 
-	clientMessage := "END"
-	if err := safe_socket.SendAll(client.conn, []byte(clientMessage)); err != nil {
-		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
-		logger.Error("send-message", logger.Fail, messageArgs...)
-		return err
-	}
-
-	responseBuffer, err := safe_socket.RecvAll(client.conn)
+	winners, err := client.sendEndAndReceiveWinners(messageId)
 	if err != nil {
-		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
-		logger.Error("recv-response", logger.Fail, messageArgs...)
 		return err
 	}
 
-	responseStr := string(responseBuffer)
-	outputFile.WriteString(responseStr + "\n")
-	outputFile.Sync()
+	if err := client.writeWinners(winners); err != nil {
+		return err
+	}
 
 	logger.Info(mainAction, logger.Success, "agency-id", client.config.AgencyId)
-
 	return nil
 }
+
