@@ -1,17 +1,21 @@
 import socket
 import logger
 import safe_socket
+import os
+import threading
 from lottery import Lottery, Bet
 
 class Server:
-    def __init__(self, server_host: str, server_port: int) -> None:
+    def __init__(self, server_host: str, server_port: int, agency_quorum_min: int) -> None:
         self.server_host = server_host
         self.server_port = server_port
+        self.agency_quorum_min = agency_quorum_min
+        self.finalized_agencies = set()
+        self.quorum_cond = threading.Condition()
 
     def _handle_client(self, client_socket):
         action = "handle-client"
         message_amount = 0
-        client_lottery = Lottery("./bets.csv")
         client_bets = []
         agency_id = None
         try:
@@ -45,6 +49,20 @@ class Server:
                 safe_socket.send_all(client_socket, b"SUCCESS\n")
 
             if agency_id is not None:
+                with self.quorum_cond:
+                    self.finalized_agencies.add(agency_id)
+                    
+                    while len(self.finalized_agencies) < self.agency_quorum_min:
+                        self.quorum_cond.wait()
+
+                    self.quorum_cond.notify_all()
+
+                lottery_storage_path = f"./bets-{agency_id}.csv"
+
+                if os.path.exists(lottery_storage_path):
+                    os.remove(lottery_storage_path)
+                
+                client_lottery = Lottery(lottery_storage_path)
                 client_lottery.store_bets(client_bets)
                 winners = self._determine_winners(client_lottery, agency_id)
                 encoded_winners = self._encode_winners(winners)
@@ -95,4 +113,8 @@ class Server:
                     raise e
                 logger.info(action, logger.LogResult.success)
 
-                self._handle_client(client_socket)
+                client_thread = threading.Thread(
+                    target=self._handle_client,
+                    args=(client_socket,)
+                )
+                client_thread.start()
