@@ -3,6 +3,7 @@ import logger
 import safe_socket
 import os
 import threading
+import signal
 from lottery import Lottery, Bet
 
 class Server:
@@ -12,6 +13,23 @@ class Server:
         self.agency_quorum_min = agency_quorum_min
         self.finalized_agencies = set()
         self.quorum_cond = threading.Condition()
+        self.running = True
+        self.server_socket = None
+        signal.signal(signal.SIGTERM, self._handle_sigterm)
+        signal.signal(signal.SIGINT, self._handle_sigterm)
+
+        self.client_sockets = set()
+        self.client_threads = []
+        self.clients_lock = threading.Lock()
+
+    def _register_client(self, client_socket, client_thread):
+        with self.clients_lock:
+            self.client_sockets.add(client_socket)
+            self.client_threads.append(client_thread)
+
+    def _unregister_client(self, client_socket):
+        with self.clients_lock:
+            self.client_sockets.remove(client_socket)
 
     def _handle_client(self, client_socket):
         action = "handle-client"
@@ -52,10 +70,13 @@ class Server:
                 with self.quorum_cond:
                     self.finalized_agencies.add(agency_id)
                     
-                    while len(self.finalized_agencies) < self.agency_quorum_min:
+                    while len(self.finalized_agencies) < self.agency_quorum_min and self.running:
                         self.quorum_cond.wait()
 
                     self.quorum_cond.notify_all()
+
+                if not self.running:
+                    return
 
                 lottery_storage_path = f"./bets-{agency_id}.csv"
 
@@ -99,22 +120,56 @@ class Server:
             lines.append(line)
         return "\n".join(lines).encode("utf-8")
 
+    def _handle_sigterm(self, signum, frame):
+        logger.info("sigterm_handler", logger.LogResult.in_progress)
+        self.running = False
+        with self.quorum_cond:
+            self.quorum_cond.notify_all()
+
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+            except Exception:
+                pass
+        with self.clients_lock:
+            for socket in list(self.client_sockets):
+                try:
+                    socket.shutdown(socket.SHUT_RDWR)
+                    socket.close()
+                except Exception:
+                    pass
+            self.client_sockets.clear()
+
     def run(self):
         action = "accept-connection"
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
-            server_socket.bind((self.server_host, self.server_port))
-            server_socket.listen()
-            while True:
-                try:
-                    logger.info(action, logger.LogResult.in_progress)
-                    client_socket, _ = server_socket.accept()
-                except Exception as e:
-                    logger.error(action, logger.LogResult.fail)
-                    raise e
-                logger.info(action, logger.LogResult.success)
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.bind((self.server_host, self.server_port))
+        server_socket.listen()
+        self.server_socket = server_socket
 
-                client_thread = threading.Thread(
-                    target=self._handle_client,
-                    args=(client_socket,)
-                )
-                client_thread.start()
+        while self.running:
+            try:
+                logger.info(action, logger.LogResult.in_progress)
+                client_socket, _ = server_socket.accept()
+            except Exception as e:
+                if not self.running:
+                    break
+                logger.error(action, logger.LogResult.fail)
+                raise e
+            logger.info(action, logger.LogResult.success)
+            client_thread = threading.Thread(
+                target=self._handle_client,
+                args=(client_socket,)
+            )
+            client_thread.start()
+
+
+        with self.clients_lock:
+            threads = list(self.client_threads)
+        for t in threads:
+            t.join(timeout=0.5)
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+            except Exception:
+                pass

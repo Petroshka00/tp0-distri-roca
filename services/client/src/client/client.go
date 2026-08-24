@@ -66,6 +66,12 @@ func connectToServer(host, port string) (net.Conn, error) {
 	return conn, err
 }
 
+func (client *Client) Close() {
+	if client.conn != nil {
+		client.conn.Close()
+	}
+}
+
 func (client *Client) Run() error {
 	const mainAction = "test-echo-server"
 	defer client.conn.Close()
@@ -87,14 +93,14 @@ func (client *Client) Run() error {
 	scanner := bufio.NewScanner(file)
 	messageId := 0
 
-	batch := []string{}
+	batch := make([]string, 0, client.config.BatchSize)
 	for scanner.Scan() {
-		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
 		clientMessage := fmt.Sprintf("%s,%s", client.config.AgencyId, scanner.Text())
 
 		batch = append(batch, clientMessage)
 
 		if len(batch) == client.config.BatchSize {
+			messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
 			finalMessage := strings.Join(batch, "\n")
 			if err := safe_socket.SendAll(client.conn, []byte(finalMessage)); err != nil {
 				logger.Error("send-message", logger.Fail, messageArgs...)
@@ -107,21 +113,22 @@ func (client *Client) Run() error {
 				return err
 			}
 
-			batch = []string{}
+			batch = batch[:0]
 		}
 		messageId++
 	}
 
-	messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
 	if len(batch) > 0 {
 		finalMessage := strings.Join(batch, "\n")
 		if err := safe_socket.SendAll(client.conn, []byte(finalMessage)); err != nil {
+			messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
 			logger.Error("send-message", logger.Fail, messageArgs...)
 			return err
 		}
 
 		responseBuffer, err := safe_socket.RecvAll(client.conn)
 		if string(responseBuffer) != "SUCCESS\n" {
+			messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
 			logger.Error("recv-batch-success", logger.Fail, messageArgs...)
 			return err
 		}
@@ -129,12 +136,14 @@ func (client *Client) Run() error {
 
 	clientMessage := "END"
 	if err := safe_socket.SendAll(client.conn, []byte(clientMessage)); err != nil {
+		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
 		logger.Error("send-message", logger.Fail, messageArgs...)
 		return err
 	}
 
 	responseBuffer, err := safe_socket.RecvAll(client.conn)
 	if err != nil {
+		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
 		logger.Error("recv-response", logger.Fail, messageArgs...)
 		return err
 	}
