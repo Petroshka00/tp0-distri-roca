@@ -59,4 +59,3 @@ func ReadAmount(socket io.Reader, amount int) ([]byte, error) {
 
 	return data, nil
 }
-
