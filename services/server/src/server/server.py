@@ -1,10 +1,16 @@
 import socket
-import logger
-import safe_socket
 import os
 import threading
 import signal
+import logger
+import safe_socket
 from lottery import Lottery, Bet
+
+DEFAULT_STORAGE_PATH = "./bets.csv"
+PROTOCOL_END = b"END"
+PROTOCOL_SUCCESS = b"SUCCESS\n"
+THREAD_JOIN_TIMEOUT_SEC = 0.5
+
 
 class Server:
     def __init__(self, server_host: str, server_port: int, agency_quorum_min: int) -> None:
@@ -14,30 +20,29 @@ class Server:
         self.finalized_agencies = set()
         self.quorum_cond = threading.Condition()
         self.running = True
-        self.server_socket = None
+        self.server_socket: socket.socket | None = None
         signal.signal(signal.SIGTERM, self._handle_sigterm)
         signal.signal(signal.SIGINT, self._handle_sigterm)
 
         self.client_sockets = set()
-        self.client_threads = []
+        self.client_threads: list[threading.Thread] = []
         self.clients_lock = threading.Lock()
 
-        lottery_storage_path = "./bets.csv"
-        if os.path.exists(lottery_storage_path):
-            os.remove(lottery_storage_path)
-        self.lottery = Lottery(lottery_storage_path)
+        if os.path.exists(DEFAULT_STORAGE_PATH):
+            os.remove(DEFAULT_STORAGE_PATH)
+        self.lottery = Lottery(DEFAULT_STORAGE_PATH)
         self.lottery_lock = threading.Lock()
 
-    def _register_client(self, client_socket, client_thread):
+    def _register_client(self, client_socket: socket.socket, client_thread: threading.Thread) -> None:
         with self.clients_lock:
             self.client_sockets.add(client_socket)
             self.client_threads.append(client_thread)
 
-    def _unregister_client(self, client_socket):
+    def _unregister_client(self, client_socket: socket.socket) -> None:
         with self.clients_lock:
             self.client_sockets.remove(client_socket)
 
-    def _process_bet_batch(self, batch_msg: str):
+    def _process_bet_batch(self, batch_msg: str) -> tuple[int | None, int]:
         decoded_bets = batch_msg.strip().split("\n")
         batch_bets = []
         agency_id = None
@@ -55,22 +60,22 @@ class Server:
 
         return agency_id, len(batch_bets)
 
-    def _receive_client_bets(self, client_socket):
+    def _receive_client_bets(self, client_socket: socket.socket) -> tuple[int | None, int, bool]:
         message_amount = 0
         agency_id = None
 
         client_message = safe_socket.recv_all(client_socket)
-        while client_message and client_message != b"END":
+        while client_message and client_message != PROTOCOL_END:
             decoded_msg = client_message.decode("utf-8")
             current_agency, bets_count = self._process_bet_batch(decoded_msg)
             if current_agency is not None:
                 agency_id = current_agency
             message_amount += bets_count
 
-            safe_socket.send_msg(client_socket, b"SUCCESS\n")
+            safe_socket.send_msg(client_socket, PROTOCOL_SUCCESS)
             client_message = safe_socket.recv_all(client_socket)
 
-        completed = (client_message == b"END")
+        completed = (client_message == PROTOCOL_END)
         return agency_id, message_amount, completed
 
     def _wait_for_quorum(self, agency_id: int) -> bool:
@@ -84,11 +89,11 @@ class Server:
     def _process_lottery_results(self, agency_id: int) -> list[Bet]:
         return self._determine_winners(agency_id)
 
-    def _send_winners(self, client_socket, winners: list[Bet]) -> None:
+    def _send_winners(self, client_socket: socket.socket, winners: list[Bet]) -> None:
         encoded_winners = self._encode_winners(winners)
         safe_socket.send_msg(client_socket, encoded_winners)
 
-    def _handle_client(self, client_socket):
+    def _handle_client(self, client_socket: socket.socket) -> None:
         action = "handle-client"
         message_amount = 0
         try:
@@ -113,8 +118,8 @@ class Server:
             self._unregister_client(client_socket)
             try:
                 client_socket.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error("close-client-socket", logger.LogResult.fail, "error", str(e))
 
     def _decode_bet(self, bet_str: str) -> Bet:
         parts = bet_str.strip().split(",")
@@ -141,28 +146,31 @@ class Server:
         ]
         return "\n".join(lines).encode("utf-8")
 
-    def _handle_sigterm(self, signum, frame):
+    def _close_server_socket(self) -> None:
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+            except Exception as e:
+                logger.error("close-server-socket", logger.LogResult.fail, "error", str(e))
+
+    def _handle_sigterm(self, signum: int, frame: object) -> None:
         logger.info("sigterm_handler", logger.LogResult.in_progress)
         self.running = False
         with self.quorum_cond:
             self.quorum_cond.notify_all()
 
-        if self.server_socket:
-            try:
-                self.server_socket.close()
-            except Exception:
-                pass
+        self._close_server_socket()
 
         with self.clients_lock:
-            for socket in list(self.client_sockets):
+            for sock in list(self.client_sockets):
                 try:
-                    socket.shutdown(socket.SHUT_RDWR)
-                    socket.close()
-                except Exception:
-                    pass
+                    sock.shutdown(socket.SHUT_RDWR)
+                    sock.close()
+                except Exception as e:
+                    logger.error("shutdown-client-socket", logger.LogResult.fail, "error", str(e))
             self.client_sockets.clear()
 
-    def run(self):
+    def run(self) -> None:
         action = "accept-connection"
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.bind((self.server_host, self.server_port))
@@ -174,10 +182,10 @@ class Server:
                 logger.info(action, logger.LogResult.in_progress)
                 client_socket, _ = server_socket.accept()
             except Exception as e:
-                if not self.running:
-                    break
-                logger.error(action, logger.LogResult.fail)
-                raise e
+                if self.running:
+                    logger.error(action, logger.LogResult.fail, "error", str(e))
+                    raise e
+                continue
 
             logger.info(action, logger.LogResult.success)
             client_thread = threading.Thread(
@@ -190,11 +198,7 @@ class Server:
         with self.clients_lock:
             threads = list(self.client_threads)
         for t in threads:
-            t.join(timeout=0.5)
+            t.join(timeout=THREAD_JOIN_TIMEOUT_SEC)
 
-        if self.server_socket:
-            try:
-                self.server_socket.close()
-            except Exception:
-                pass
+        self._close_server_socket()
 
