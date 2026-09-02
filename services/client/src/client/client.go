@@ -1,24 +1,18 @@
 package client
 
 import (
+	"bufio"
+	"fmt"
 	"net"
+	"os"
 	"time"
 
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/safe_socket"
-
-	"bufio"
-	"fmt"
-	"os"
-	"strings"
 )
 
 const CONNECTION_ATTEMPTS_MAX = 3
 const CONNECTION_ATTEMPS_DELAY_MS = 200
-
-const ECHO_CLIENT_BUFFER_SIZE = 512
-const ECHO_CLIENT_MESSAGE_AMOUNT = 3
-const ECHO_CLIENT_MESSAGE_DELAY_MS = 1000
 
 type ClientConfig struct {
 	ServerHost string
@@ -74,8 +68,15 @@ func (client *Client) Close() {
 
 func (client *Client) sendBatch(batch []string, messageId int) error {
 	messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
-	finalMessage := strings.Join(batch, "\n")
-	if err := safe_socket.SendMsg(client.conn, []byte(finalMessage)); err != nil {
+	var finalMessage []byte
+	for i, line := range batch {
+		if i > 0 {
+			finalMessage = append(finalMessage, '\n')
+		}
+		finalMessage = append(finalMessage, line...)
+	}
+
+	if err := safe_socket.SendMsg(client.conn, finalMessage); err != nil {
 		logger.Error("send-message", logger.Fail, messageArgs...)
 		return err
 	}
