@@ -26,10 +26,13 @@ class Server:
 
         self.client_sockets = set()
         self.client_threads: list[threading.Thread] = []
-        self.clients_lock = threading.Lock()
+        self.clients_lock = threading.RLock()
 
         if os.path.exists(DEFAULT_STORAGE_PATH):
-            os.remove(DEFAULT_STORAGE_PATH)
+            try:
+                os.remove(DEFAULT_STORAGE_PATH)
+            except OSError as e:
+                logger.error("remove-storage-file", logger.LogResult.fail, "error", str(e))
         self.lottery = Lottery(DEFAULT_STORAGE_PATH)
         self.lottery_lock = threading.Lock()
 
@@ -40,7 +43,7 @@ class Server:
 
     def _unregister_client(self, client_socket: socket.socket) -> None:
         with self.clients_lock:
-            self.client_sockets.remove(client_socket)
+            self.client_sockets.discard(client_socket)
 
     def _process_bet_batch(self, batch_msg: str) -> tuple[int | None, int]:
         decoded_bets = batch_msg.strip().split("\n")
@@ -86,9 +89,6 @@ class Server:
             self.quorum_cond.notify_all()
         return self.running
 
-    def _process_lottery_results(self, agency_id: int) -> list[Bet]:
-        return self._determine_winners(agency_id)
-
     def _send_winners(self, client_socket: socket.socket, winners: list[Bet]) -> None:
         encoded_winners = self._encode_winners(winners)
         safe_socket.send_msg(client_socket, encoded_winners)
@@ -101,19 +101,18 @@ class Server:
 
             agency_id, message_amount, completed = self._receive_client_bets(client_socket)
             if not completed or agency_id is None:
-                logger.info(action, logger.LogResult.success, "messages-amount", message_amount)
+                logger.error(action, logger.LogResult.fail, "messages-amount", message_amount)
                 return
 
             if not self._wait_for_quorum(agency_id):
                 return
 
-            winners = self._process_lottery_results(agency_id)
+            winners = self._determine_winners(agency_id)
             self._send_winners(client_socket, winners)
             logger.info(action, logger.LogResult.success, "messages-amount", message_amount)
 
         except Exception as e:
-            logger.error(action, logger.LogResult.fail, "messages-amount", message_amount)
-            raise e
+            logger.error(action, logger.LogResult.fail, "messages-amount", message_amount, "error", str(e))
         finally:
             self._unregister_client(client_socket)
             try:
@@ -123,6 +122,8 @@ class Server:
 
     def _decode_bet(self, bet_str: str) -> Bet:
         parts = bet_str.strip().split(",")
+        if len(parts) < 6:
+            raise ValueError(f"Malformed bet string (expected 6 comma-separated values): {bet_str!r}")
         return Bet(
             agency_id=int(parts[0]),
             first_name=parts[1],

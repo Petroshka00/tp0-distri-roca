@@ -11,8 +11,12 @@ import (
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/safe_socket"
 )
 
-const CONNECTION_ATTEMPTS_MAX = 3
-const CONNECTION_ATTEMPS_DELAY_MS = 200
+const (
+	CONNECTION_ATTEMPTS_MAX     = 3
+	CONNECTION_ATTEMPS_DELAY_MS = 200
+	PROTOCOL_SUCCESS            = "SUCCESS\n"
+	PROTOCOL_END                = "END"
+)
 
 type ClientConfig struct {
 	ServerHost string
@@ -42,22 +46,23 @@ func NewClient(config ClientConfig) (*Client, error) {
 func connectToServer(host, port string) (net.Conn, error) {
 	const action = "connect-to-server"
 	var err error
-	var conn net.Conn
 
 	logger.Info(action, logger.InProgress)
+	address := net.JoinHostPort(host, port)
 	for i := range CONNECTION_ATTEMPTS_MAX {
-		conn, err = net.Dial("tcp", host+":"+port)
-		if err != nil {
+		conn, dialErr := net.Dial("tcp", address)
+		if dialErr != nil {
+			err = dialErr
 			logger.Warn(action, logger.Fail, "attempt", i)
 			time.Sleep(CONNECTION_ATTEMPS_DELAY_MS * time.Millisecond)
 			continue
 		}
 
 		logger.Info(action, logger.Success)
-		break
+		return conn, nil
 	}
 
-	return conn, err
+	return nil, err
 }
 
 func (client *Client) Close() {
@@ -82,9 +87,13 @@ func (client *Client) sendBatch(batch []string, messageId int) error {
 	}
 
 	responseBuffer, err := safe_socket.RecvMsg(client.conn)
-	if err != nil || string(responseBuffer) != "SUCCESS\n" {
+	if err != nil {
 		logger.Error("recv-batch-success", logger.Fail, messageArgs...)
 		return err
+	}
+	if string(responseBuffer) != PROTOCOL_SUCCESS {
+		logger.Error("recv-batch-success", logger.Fail, messageArgs...)
+		return fmt.Errorf("unexpected server response: %q", string(responseBuffer))
 	}
 
 	return nil
@@ -92,7 +101,7 @@ func (client *Client) sendBatch(batch []string, messageId int) error {
 
 func (client *Client) sendEndAndReceiveWinners(messageId int) (string, error) {
 	messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
-	if err := safe_socket.SendMsg(client.conn, []byte("END")); err != nil {
+	if err := safe_socket.SendMsg(client.conn, []byte(PROTOCOL_END)); err != nil {
 		logger.Error("send-message", logger.Fail, messageArgs...)
 		return "", err
 	}
@@ -114,14 +123,16 @@ func (client *Client) writeWinners(winners string) error {
 	}
 	defer outputFile.Close()
 
-	if _, err := outputFile.WriteString(winners + "\n"); err != nil {
-		return err
+	if len(winners) > 0 {
+		if _, err := outputFile.WriteString(winners + "\n"); err != nil {
+			return err
+		}
 	}
 	return outputFile.Sync()
 }
 
 func (client *Client) Run() error {
-	const mainAction = "test-echo-server"
+	const mainAction = "run-client"
 	defer client.conn.Close()
 
 	file, err := os.Open(client.config.InputFile)
@@ -143,15 +154,21 @@ func (client *Client) Run() error {
 			if err := client.sendBatch(batch, messageId); err != nil {
 				return err
 			}
-			batch = batch[:0]
+			batch = []string{}
+			messageId++
 		}
-		messageId++
+	}
+
+	if err := scanner.Err(); err != nil {
+		logger.Error("read-file", logger.Fail, "file-path", client.config.InputFile)
+		return err
 	}
 
 	if len(batch) > 0 {
 		if err := client.sendBatch(batch, messageId); err != nil {
 			return err
 		}
+		messageId++
 	}
 
 	winners, err := client.sendEndAndReceiveWinners(messageId)
@@ -166,4 +183,3 @@ func (client *Client) Run() error {
 	logger.Info(mainAction, logger.Success, "agency-id", client.config.AgencyId)
 	return nil
 }
-
