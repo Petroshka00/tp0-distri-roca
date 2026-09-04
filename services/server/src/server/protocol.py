@@ -1,4 +1,5 @@
 import safe_socket
+import logger
 from lottery import Bet
 
 HEADER_SIZE = 5
@@ -30,27 +31,23 @@ def recv_msg(socket_obj) -> tuple[int | None, bytes]:
     return opcode, payload
 
 
-def decode_bet(bet_str: str, agency_id: int) -> Bet:
+def decode_bet(bet_str: str, agency_id: int) -> Bet | None:
     parts = bet_str.strip().split(",")
     if len(parts) == 5:
-        return Bet(
-            agency_id=agency_id,
-            first_name=parts[0],
-            last_name=parts[1],
-            document=int(parts[2]),
-            birthdate=parts[3],
-            number=int(parts[4]),
-        )
-    elif len(parts) >= 6:
-        return Bet(
-            agency_id=int(parts[0]),
-            first_name=parts[1],
-            last_name=parts[2],
-            document=int(parts[3]),
-            birthdate=parts[4],
-            number=int(parts[5]),
-        )
-    raise ValueError(f"Malformed bet string: {bet_str!r}")
+        try:
+            return Bet(
+                agency_id=agency_id,
+                first_name=parts[0],
+                last_name=parts[1],
+                document=int(parts[2]),
+                birthdate=parts[3],
+                number=int(parts[4]),
+            )
+        except (ValueError, IndexError) as e:
+            logger.error("decode-bet", logger.LogResult.fail, "error", str(e), "bet", bet_str)
+            return None
+    logger.error("decode-bet", logger.LogResult.fail, "error", "Invalid field count", "bet", bet_str)
+    return None
 
 
 def decode_batch(payload: bytes, agency_id: int) -> list[Bet]:
@@ -59,7 +56,9 @@ def decode_batch(payload: bytes, agency_id: int) -> list[Bet]:
     for bet_str in decoded_bets:
         if not bet_str:
             continue
-        batch_bets.append(decode_bet(bet_str, agency_id))
+        bet = decode_bet(bet_str, agency_id)
+        if bet is not None:
+            batch_bets.append(bet)
     return batch_bets
 
 
