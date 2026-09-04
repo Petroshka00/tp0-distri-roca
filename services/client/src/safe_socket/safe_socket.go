@@ -15,10 +15,6 @@ func SendAll(socket io.Writer, data []byte) error {
 }
 
 func RecvAll(socket io.Reader, amount int) ([]byte, error) {
-	return ReadAmount(socket, amount)
-}
-
-func ReadAmount(socket io.Reader, amount int) ([]byte, error) {
 	data := make([]byte, amount)
 	readTotalData := 0
 
@@ -32,5 +28,3 @@ func ReadAmount(socket io.Reader, amount int) ([]byte, error) {
 
 	return data, nil
 }
-
-
