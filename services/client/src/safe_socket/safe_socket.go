@@ -1,11 +1,6 @@
 package safe_socket
 
-import (
-	"encoding/binary"
-	"io"
-)
-
-const HeaderSize = 4
+import "io"
 
 func SendAll(socket io.Writer, data []byte) error {
 	alreadyWritten := 0
@@ -19,30 +14,8 @@ func SendAll(socket io.Writer, data []byte) error {
 	return nil
 }
 
-func SendMsg(socket io.Writer, payload []byte) error {
-	dataLength := len(payload)
-	message := make([]byte, HeaderSize+dataLength)
-	binary.BigEndian.PutUint32(message[:HeaderSize], uint32(dataLength))
-	copy(message[HeaderSize:], payload)
-	return SendAll(socket, message)
-}
-
 func RecvAll(socket io.Reader, amount int) ([]byte, error) {
 	return ReadAmount(socket, amount)
-}
-
-func RecvMsg(socket io.Reader) ([]byte, error) {
-	header, err := ReadAmount(socket, HeaderSize)
-	if err != nil {
-		return nil, err
-	}
-
-	dataLength := binary.BigEndian.Uint32(header)
-	if dataLength == 0 {
-		return []byte{}, nil
-	}
-
-	return ReadAmount(socket, int(dataLength))
 }
 
 func ReadAmount(socket io.Reader, amount int) ([]byte, error) {
@@ -59,3 +32,5 @@ func ReadAmount(socket io.Reader, amount int) ([]byte, error) {
 
 	return data, nil
 }
+
+

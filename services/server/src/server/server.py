@@ -3,12 +3,10 @@ import os
 import threading
 import signal
 import logger
-import safe_socket
+from . import protocol
 from lottery import Lottery, Bet
 
 DEFAULT_STORAGE_PATH = "./bets.csv"
-PROTOCOL_END = b"END"
-PROTOCOL_SUCCESS = b"SUCCESS\n"
 THREAD_JOIN_TIMEOUT_SEC = 0.5
 
 
@@ -45,42 +43,6 @@ class Server:
         with self.clients_lock:
             self.client_sockets.discard(client_socket)
 
-    def _process_bet_batch(self, batch_msg: str) -> tuple[int | None, int]:
-        decoded_bets = batch_msg.strip().split("\n")
-        batch_bets = []
-        agency_id = None
-
-        for bet_str in decoded_bets:
-            if not bet_str:
-                continue
-            bet = self._decode_bet(bet_str)
-            agency_id = bet.agency_id
-            batch_bets.append(bet)
-
-        if batch_bets:
-            with self.lottery_lock:
-                self.lottery.store_bets(batch_bets)
-
-        return agency_id, len(batch_bets)
-
-    def _receive_client_bets(self, client_socket: socket.socket) -> tuple[int | None, int, bool]:
-        message_amount = 0
-        agency_id = None
-
-        client_message = safe_socket.recv_all(client_socket)
-        while client_message and client_message != PROTOCOL_END:
-            decoded_msg = client_message.decode("utf-8")
-            current_agency, bets_count = self._process_bet_batch(decoded_msg)
-            if current_agency is not None:
-                agency_id = current_agency
-            message_amount += bets_count
-
-            safe_socket.send_msg(client_socket, PROTOCOL_SUCCESS)
-            client_message = safe_socket.recv_all(client_socket)
-
-        completed = (client_message == PROTOCOL_END)
-        return agency_id, message_amount, completed
-
     def _wait_for_quorum(self, agency_id: int) -> bool:
         with self.quorum_cond:
             self.finalized_agencies.add(agency_id)
@@ -89,9 +51,12 @@ class Server:
             self.quorum_cond.notify_all()
         return self.running
 
-    def _send_winners(self, client_socket: socket.socket, winners: list[Bet]) -> None:
-        encoded_winners = self._encode_winners(winners)
-        safe_socket.send_msg(client_socket, encoded_winners)
+    def _determine_winners(self, agency_id: int) -> list[Bet]:
+        with self.lottery_lock:
+            return [
+                bet for bet in self.lottery.load_bets()
+                if bet.agency_id == agency_id and self.lottery.has_won(bet)
+            ]
 
     def _handle_client(self, client_socket: socket.socket) -> None:
         action = "handle-client"
@@ -99,8 +64,39 @@ class Server:
         try:
             logger.info(action, logger.LogResult.in_progress)
 
-            agency_id, message_amount, completed = self._receive_client_bets(client_socket)
-            if not completed or agency_id is None:
+            opcode, payload = protocol.recv_msg(client_socket)
+            if opcode != protocol.CONNECT:
+                logger.error(action, logger.LogResult.fail, "error", f"Expected CONNECT, got {opcode}")
+                protocol.send_msg(client_socket, protocol.ERROR, b"Expected CONNECT")
+                return
+
+            agency_id = int(payload.decode("utf-8").strip())
+            protocol.send_msg(client_socket, protocol.ACK)
+
+            completed = False
+            while self.running:
+                opcode, payload = protocol.recv_msg(client_socket)
+                if opcode is None:
+                    break
+
+                if opcode == protocol.BET_BATCH:
+                    bets = protocol.decode_batch(payload, agency_id)
+                    if bets:
+                        with self.lottery_lock:
+                            self.lottery.store_bets(bets)
+                    message_amount += len(bets)
+                    protocol.send_msg(client_socket, protocol.ACK)
+
+                elif opcode == protocol.END:
+                    completed = True
+                    break
+
+                else:
+                    logger.error(action, logger.LogResult.fail, "error", f"Unexpected opcode {opcode}")
+                    protocol.send_msg(client_socket, protocol.ERROR, b"Unexpected opcode")
+                    return
+
+            if not completed:
                 logger.error(action, logger.LogResult.fail, "messages-amount", message_amount)
                 return
 
@@ -108,7 +104,8 @@ class Server:
                 return
 
             winners = self._determine_winners(agency_id)
-            self._send_winners(client_socket, winners)
+            encoded_winners = protocol.encode_winners(winners)
+            protocol.send_msg(client_socket, protocol.WINNERS, encoded_winners)
             logger.info(action, logger.LogResult.success, "messages-amount", message_amount)
 
         except Exception as e:
@@ -120,32 +117,7 @@ class Server:
             except Exception as e:
                 logger.error("close-client-socket", logger.LogResult.fail, "error", str(e))
 
-    def _decode_bet(self, bet_str: str) -> Bet:
-        parts = bet_str.strip().split(",")
-        if len(parts) < 6:
-            raise ValueError(f"Malformed bet string (expected 6 comma-separated values): {bet_str!r}")
-        return Bet(
-            agency_id=int(parts[0]),
-            first_name=parts[1],
-            last_name=parts[2],
-            document=int(parts[3]),
-            birthdate=parts[4],
-            number=int(parts[5]),
-        )
 
-    def _determine_winners(self, agency_id: int) -> list[Bet]:
-        with self.lottery_lock:
-            return [
-                bet for bet in self.lottery.load_bets()
-                if bet.agency_id == agency_id and self.lottery.has_won(bet)
-            ]
-
-    def _encode_winners(self, winners: list[Bet]) -> bytes:
-        lines = [
-            f"{winner.first_name},{winner.last_name},{winner.document},{winner.birthdate},{winner.number}"
-            for winner in winners
-        ]
-        return "\n".join(lines).encode("utf-8")
 
     def _close_server_socket(self) -> None:
         if self.server_socket:

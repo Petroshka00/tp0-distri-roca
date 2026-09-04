@@ -5,17 +5,16 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
-	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/safe_socket"
+	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/protocol"
 )
 
 const (
 	CONNECTION_ATTEMPTS_MAX     = 3
 	CONNECTION_ATTEMPS_DELAY_MS = 200
-	PROTOCOL_SUCCESS            = "SUCCESS\n"
-	PROTOCOL_END                = "END"
 )
 
 type ClientConfig struct {
@@ -71,29 +70,42 @@ func (client *Client) Close() {
 	}
 }
 
-func (client *Client) sendBatch(batch []string, messageId int) error {
-	messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
-	var finalMessage []byte
-	for i, line := range batch {
-		if i > 0 {
-			finalMessage = append(finalMessage, '\n')
-		}
-		finalMessage = append(finalMessage, line...)
+func (client *Client) connect() error {
+	if err := protocol.SendMsg(client.conn, protocol.Connect, []byte(client.config.AgencyId)); err != nil {
+		logger.Error("connect-agency", logger.Fail, "agency-id", client.config.AgencyId)
+		return err
 	}
 
-	if err := safe_socket.SendMsg(client.conn, finalMessage); err != nil {
+	msgType, payload, err := protocol.RecvMsg(client.conn)
+	if err != nil {
+		logger.Error("connect-agency-ack", logger.Fail, "agency-id", client.config.AgencyId)
+		return err
+	}
+	if msgType != protocol.Ack {
+		logger.Error("connect-agency-ack", logger.Fail, "agency-id", client.config.AgencyId, "type", msgType)
+		return fmt.Errorf("unexpected connect response type %d: %q", msgType, string(payload))
+	}
+
+	return nil
+}
+
+func (client *Client) sendBatch(batch []string, messageId int) error {
+	messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
+	payload := strings.Join(batch, "\n")
+
+	if err := protocol.SendMsg(client.conn, protocol.BetBatch, []byte(payload)); err != nil {
 		logger.Error("send-message", logger.Fail, messageArgs...)
 		return err
 	}
 
-	responseBuffer, err := safe_socket.RecvMsg(client.conn)
+	msgType, respPayload, err := protocol.RecvMsg(client.conn)
 	if err != nil {
 		logger.Error("recv-batch-success", logger.Fail, messageArgs...)
 		return err
 	}
-	if string(responseBuffer) != PROTOCOL_SUCCESS {
+	if msgType != protocol.Ack {
 		logger.Error("recv-batch-success", logger.Fail, messageArgs...)
-		return fmt.Errorf("unexpected server response: %q", string(responseBuffer))
+		return fmt.Errorf("unexpected server response type %d: %q", msgType, string(respPayload))
 	}
 
 	return nil
@@ -101,18 +113,22 @@ func (client *Client) sendBatch(batch []string, messageId int) error {
 
 func (client *Client) sendEndAndReceiveWinners(messageId int) (string, error) {
 	messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
-	if err := safe_socket.SendMsg(client.conn, []byte(PROTOCOL_END)); err != nil {
+	if err := protocol.SendMsg(client.conn, protocol.End, nil); err != nil {
 		logger.Error("send-message", logger.Fail, messageArgs...)
 		return "", err
 	}
 
-	responseBuffer, err := safe_socket.RecvMsg(client.conn)
+	msgType, payload, err := protocol.RecvMsg(client.conn)
 	if err != nil {
 		logger.Error("recv-response", logger.Fail, messageArgs...)
 		return "", err
 	}
+	if msgType != protocol.Winners {
+		logger.Error("recv-response", logger.Fail, messageArgs...)
+		return "", fmt.Errorf("unexpected response type %d: %q", msgType, string(payload))
+	}
 
-	return string(responseBuffer), nil
+	return string(payload), nil
 }
 
 func (client *Client) writeWinners(winners string) error {
@@ -135,6 +151,10 @@ func (client *Client) Run() error {
 	const mainAction = "run-client"
 	defer client.conn.Close()
 
+	if err := client.connect(); err != nil {
+		return err
+	}
+
 	file, err := os.Open(client.config.InputFile)
 	if err != nil {
 		logger.Error("open-file", logger.Fail, "file-path", client.config.InputFile)
@@ -147,14 +167,13 @@ func (client *Client) Run() error {
 
 	batch := make([]string, 0, client.config.BatchSize)
 	for scanner.Scan() {
-		clientMessage := fmt.Sprintf("%s,%s", client.config.AgencyId, scanner.Text())
-		batch = append(batch, clientMessage)
+		batch = append(batch, scanner.Text())
 
 		if len(batch) == client.config.BatchSize {
 			if err := client.sendBatch(batch, messageId); err != nil {
 				return err
 			}
-			batch = []string{}
+			batch = batch[:0]
 			messageId++
 		}
 	}
@@ -183,3 +202,4 @@ func (client *Client) Run() error {
 	logger.Info(mainAction, logger.Success, "agency-id", client.config.AgencyId)
 	return nil
 }
+
